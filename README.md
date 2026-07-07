@@ -46,6 +46,173 @@ DeepThink, and disable Search. The search tool selects `Instant` and enables Sea
 reuse the active conversation for up to 20 turns. A patch/test/repair operation uses one fresh
 conversation for the entire operation rather than creating a chat for every internal request.
 
+## Cost efficiency
+
+DeepSeek Web Bridge is not just a DeepSeek wrapper. It is a cost-control layer for Claude Code.
+
+The bridge saves money in two separate ways:
+
+1. **Model-price savings** — heavy work can run through DeepSeek instead of a more expensive Claude
+   model.
+2. **Context savings** — large generated patches, repair loops, test logs, and intermediate
+   reasoning stay outside Claude Code's paid context.
+
+The second effect is usually the bigger win on large coding jobs.
+
+Pricing checked July 7, 2026: [DeepSeek's official pricing page](https://api-docs.deepseek.com/quick_start/pricing/)
+lists V4 Flash at `$0.14 / 1M` input tokens and `$0.28 / 1M` output tokens, and V4 Pro
+at `$0.435 / 1M` input and `$0.87 / 1M` output. [Anthropic's official pricing page](https://platform.claude.com/docs/en/about-claude/pricing)
+lists Claude Haiku 4.5 at `$1 / 1M` input and `$5 / 1M` output, and Claude Sonnet 4.5 / 4.6
+at `$3 / 1M` input and `$15 / 1M` output.
+
+### Raw model-cost comparison
+
+For a representative coding-agent turn:
+
+```text
+50k input tokens + 15k output tokens
+```
+
+| Route                   | Input cost | Output cost | Total cost |
+| ----------------------- | ---------: | ----------: | ---------: |
+| Claude Sonnet 4.5 / 4.6 |  `$0.1500` |   `$0.2250` |  `$0.3750` |
+| Claude Haiku 4.5        |  `$0.0500` |   `$0.0750` |  `$0.1250` |
+| DeepSeek V4 Pro API     |  `$0.0218` |   `$0.0131` |  `$0.0348` |
+| DeepSeek V4 Flash API   |  `$0.0070` |   `$0.0042` |  `$0.0112` |
+
+So on API token price alone:
+
+| Comparison                         | Approximate savings |
+| ---------------------------------- | ------------------: |
+| DeepSeek V4 Flash vs Claude Sonnet |    `~33.5x cheaper` |
+| DeepSeek V4 Pro vs Claude Sonnet   |    `~10.8x cheaper` |
+| DeepSeek V4 Flash vs Claude Haiku  |    `~11.2x cheaper` |
+| DeepSeek V4 Pro vs Claude Haiku    |     `~3.6x cheaper` |
+
+### What the bridge adds on top
+
+The bridge does **not** make DeepSeek API tokens cheaper. It saves more money by moving expensive
+work out of the paid Claude Code loop.
+
+The key approximation is:
+
+```text
+Additional bridge efficiency ≈ 1 / remaining paid-token fraction
+```
+
+| Heavy work moved to bridge | Remaining paid token burden | Extra efficiency vs DeepSeek API-only |
+| -------------------------: | --------------------------: | ------------------------------------: |
+|                      `50%` |                       `50%` |                                  `2x` |
+|                      `80%` |                       `20%` |                                  `5x` |
+|                      `90%` |                       `10%` |                                 `10x` |
+|                      `95%` |                        `5%` |                                 `20x` |
+
+That means if you were already using **DeepSeek API inside Claude Code**, the bridge's incremental
+benefit is usually:
+
+```text
+~5x to 20x cheaper on large implementation jobs
+```
+
+assuming it offloads `80–95%` of the actual coding, reasoning, patching, and repair tokens.
+
+### Combined efficiency estimate
+
+The combined stack is:
+
+```text
+Claude Code coordinator + DeepSeek Bridge heavy-work offload
+```
+
+Practical efficiency ranges:
+
+| Baseline                               |                   Expected savings |
+| -------------------------------------- | ---------------------------------: |
+| Claude Code using Sonnet directly      |             `~25x to 100x cheaper` |
+| Claude Code already using DeepSeek API |               `~5x to 20x cheaper` |
+| Claude Code using Haiku only           | bridge helps mainly on larger jobs |
+| Tiny one-file edits                    | bridge may not be worth the overhead |
+
+These are directional estimates based on the stated token-offload assumptions, not guaranteed
+billing outcomes. Actual savings depend on prompt caching, model routing, task shape, coordinator
+overhead, retries, and the pricing or limits attached to the DeepSeek web account.
+
+The bridge is most useful when Claude Code would otherwise repeatedly send:
+
+- repository context
+- generated source
+- diffs
+- failed patches
+- test output
+- repair attempts
+- long reasoning traces
+
+Those are the tokens the bridge keeps out of Claude's context.
+
+### Recommended operating mode
+
+Use Claude Code as the coordinator. Use DeepSeek Bridge for the expensive work.
+
+```text
+Claude Code / Haiku:
+  - coordinate
+  - inspect local files
+  - choose MCP tools
+  - review results
+  - avoid long loops
+
+DeepSeek Bridge:
+  - implementation
+  - patch generation
+  - test/repair cycles
+  - substantial analysis
+  - web research
+```
+
+Recommended default:
+
+```text
+Claude Code model: low-cost native Claude model, such as Haiku
+Heavy implementation: deepseek_patch
+Technical analysis: deepseek_expert
+Code returned in chat: deepseek_generate
+Current web research: deepseek_search
+```
+
+Avoid:
+
+```text
+Plan Mode
+subagent fan-out
+polling loops
+sleep-based retry loops
+dumping generated source into Claude context unnecessarily
+using DeepSeek as Claude Code's Anthropic endpoint while also relying on this MCP bridge
+```
+
+### Direct DeepSeek API vs bridge mode
+
+DeepSeek supports [Anthropic-compatible API integration for Claude Code](https://api-docs.deepseek.com/guides/agent_integrations/claude_code).
+That is a different architecture:
+
+```text
+Claude Code -> DeepSeek API
+```
+
+This bridge uses:
+
+```text
+Claude Code -> MCP -> persistent DeepSeek web session
+```
+
+Do not mix the two casually. Direct DeepSeek API mode can reduce raw model cost. Bridge mode
+reduces raw model cost **and** prevents large implementation loops from entering Claude Code's paid
+context.
+
+Use direct API mode when you want DeepSeek to be the coding-agent backend. Use bridge mode when
+you want Claude Code to remain the local coordinator while DeepSeek handles the expensive work
+outside Claude's context.
+
 ## Overnight jobs
 
 Submit the work once:
