@@ -1,0 +1,12 @@
+#!/bin/zsh
+set -eu
+
+ROOT_LINK="$HOME/Library/Application Support/deepseek-bridge/install-root"
+if [[ ! -L "$ROOT_LINK" ]]; then
+    print -u2 "DeepSeek Bridge is not installed. Run install-macos.sh."
+    exit 1
+fi
+
+ROOT="$(readlink "$ROOT_LINK")"
+cd "$ROOT"
+exec "$ROOT/.venv/bin/python" -m deepseek_bridge.daemon
