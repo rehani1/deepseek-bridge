@@ -73,8 +73,67 @@ class JobStoreTest(unittest.TestCase):
             self.assertEqual(recovered["status"], "waiting")
             self.assertIn("safely requeued", recovered["error"])
 
+    def test_job_list_can_be_scoped_to_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_root = root / "first"
+            second_root = root / "second"
+            first_root.mkdir()
+            second_root.mkdir()
+            store = JobStore(root / "jobs.sqlite3")
+            for project_root, task in ((first_root, "First"), (second_root, "Second")):
+                store.submit(
+                    task=task,
+                    project_root=str(project_root.resolve()),
+                    paths=None,
+                    test_command=None,
+                    apply_changes=False,
+                    max_repairs=0,
+                    keep_awake=False,
+                    max_wait_hours=1,
+                )
+
+            scoped = store.list(10, str(first_root / "."))
+
+            self.assertEqual([job["task"] for job in scoped], ["First"])
+
 
 class JobManagerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_pending_job_reuses_durable_job(self) -> None:
+        class FakeBridge:
+            pass
+
+        class FakePatchAgent:
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = JobStore(Path(directory) / "jobs.sqlite3")
+            manager = JobManager(FakeBridge(), FakePatchAgent(), asyncio.Lock(), store=store)
+            params = {
+                "task": "Execute snapshotted Phase 3 plan",
+                "project_root": directory,
+                "paths": ["src", "README.md"],
+                "test_command": "true",
+                "apply_changes": True,
+                "keep_awake": False,
+                "max_wait_hours": 12,
+            }
+
+            first = manager.submit(params)
+            second = manager.submit(
+                {
+                    **params,
+                    "project_root": str(Path(directory) / "."),
+                    "paths": ["README.md", "src", "src"],
+                    "test_command": "  true  ",
+                }
+            )
+
+            self.assertEqual(first["job_id"], second["job_id"])
+            self.assertFalse(first["deduplicated"])
+            self.assertTrue(second["deduplicated"])
+            self.assertEqual(len(store.list(10)), 1)
+
     async def test_worker_completes_job_without_polling_provider(self) -> None:
         class FakeBridge:
             def current_conversation_url(self):

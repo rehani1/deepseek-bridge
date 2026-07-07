@@ -49,6 +49,12 @@ DeepThink, and disable Search. The search tool selects `Instant` and enables Sea
 reuse the active conversation for up to 20 turns. A patch/test/repair operation uses one fresh
 conversation for the entire operation rather than creating a chat for every internal request.
 
+For multi-session projects, keep plans in the repository and submit them with `plan_path`. The
+bridge reads and hashes the plan once, embeds that exact snapshot in the SQLite job, and then reads
+bounded current repository context in the isolated worktree. Claude and VS Code can close after
+submission without losing the objective. Repeating an identical submission while it is pending
+returns the existing job ID instead of creating a duplicate.
+
 ## Cost efficiency
 
 DeepSeek Web Bridge is not just a DeepSeek wrapper. It is a cost-control layer for Claude Code.
@@ -223,6 +229,15 @@ Submit the work once:
 ```text
 Use deepseek_patch to implement the downloader changes. Restrict changes to src and tests,
 run python -m pytest, keep the Mac awake, and wait up to 12 hours.
+```
+
+For a durable project phase, save the detailed plan first and submit only a short objective plus
+its repository-relative path:
+
+```text
+Use deepseek_patch with task="Execute Phase 3", plan_path="docs/plans/phase-3.md",
+paths=["src", "frontend", "README.md", ".github"], test_command="mvn test".
+Return the job ID and do not poll.
 ```
 
 Claude receives a job ID immediately and can end its turn. The LaunchAgent persists the queue in

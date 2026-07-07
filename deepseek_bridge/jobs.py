@@ -116,6 +116,37 @@ class JobStore:
             )
         return self.get(job_id)
 
+    def find_pending_duplicate(
+        self,
+        *,
+        task: str,
+        project_root: str,
+        paths: list[str] | None,
+        test_command: str | None,
+        apply_changes: bool,
+    ) -> dict[str, Any] | None:
+        paths_json = json.dumps(paths or [])
+        placeholders = ",".join("?" for _ in PENDING_STATES)
+        with self.connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT * FROM jobs
+                WHERE task=? AND project_root=? AND paths_json=?
+                    AND COALESCE(test_command, '')=COALESCE(?, '')
+                    AND apply_changes=? AND status IN ({placeholders})
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (
+                    task,
+                    project_root,
+                    paths_json,
+                    test_command,
+                    int(apply_changes),
+                    *tuple(PENDING_STATES),
+                ),
+            ).fetchone()
+        return self._decode(row) if row is not None else None
+
     @staticmethod
     def _decode(row: sqlite3.Row) -> dict[str, Any]:
         value = dict(row)
@@ -133,12 +164,19 @@ class JobStore:
             raise KeyError(f"Unknown DeepSeek job: {job_id}")
         return self._decode(row)
 
-    def list(self, limit: int = 10) -> list[dict[str, Any]]:
+    def list(self, limit: int = 10, project_root: str | None = None) -> list[dict[str, Any]]:
         with self.connection() as connection:
-            rows = connection.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
-                (max(1, min(limit, 50)),),
-            ).fetchall()
+            bounded_limit = max(1, min(limit, 50))
+            if project_root:
+                rows = connection.execute(
+                    "SELECT * FROM jobs WHERE project_root=? ORDER BY created_at DESC LIMIT ?",
+                    (str(Path(project_root).expanduser().resolve()), bounded_limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
+                    (bounded_limit,),
+                ).fetchall()
         return [self._decode(row) for row in rows]
 
     def claim_due(self) -> dict[str, Any] | None:
@@ -303,35 +341,57 @@ class JobManager:
 
     def submit(self, params: dict[str, Any]) -> dict[str, Any]:
         task = normalize_task(str(params.get("task", "")))
-        project_root = str(params.get("project_root", ""))
-        if not project_root or not Path(project_root).expanduser().is_dir():
-            raise ValueError(f"Project root does not exist: {project_root}")
+        requested_root = str(params.get("project_root", ""))
+        root = Path(requested_root).expanduser().resolve()
+        if not requested_root or not root.is_dir():
+            raise ValueError(f"Project root does not exist: {requested_root}")
+        project_root = str(root)
         paths = params.get("paths")
         if paths is not None and (
             not isinstance(paths, list) or not all(isinstance(path, str) for path in paths)
         ):
             raise ValueError("paths must be a list of repository-relative strings")
+        if paths is not None:
+            paths = sorted(dict.fromkeys(path.strip() for path in paths if path.strip()))
         max_wait_hours = max(1, min(int(params.get("max_wait_hours", 12)), 24))
         max_repairs = max(0, min(int(params.get("max_repairs", 2)), 2))
+        apply_changes = bool(params.get("apply_changes", True))
+        test_command = params.get("test_command")
+        if test_command is not None and not isinstance(test_command, str):
+            raise ValueError("test_command must be a string")
+        test_command = test_command.strip() or None if test_command is not None else None
+        duplicate = self.store.find_pending_duplicate(
+            task=task,
+            project_root=project_root,
+            paths=paths,
+            test_command=test_command,
+            apply_changes=apply_changes,
+        )
+        if duplicate is not None:
+            result = public_job(duplicate)
+            result["deduplicated"] = True
+            return result
         job = self.store.submit(
             task=task,
             project_root=project_root,
             paths=paths,
-            test_command=params.get("test_command"),
-            apply_changes=bool(params.get("apply_changes", True)),
+            test_command=test_command,
+            apply_changes=apply_changes,
             max_repairs=max_repairs,
             keep_awake=bool(params.get("keep_awake", True)),
             max_wait_hours=max_wait_hours,
         )
         self.wake.set()
         self._refresh_caffeinate()
-        return public_job(job)
+        result = public_job(job)
+        result["deduplicated"] = False
+        return result
 
     def status(self, job_id: str) -> dict[str, Any]:
         return public_job(self.store.get(job_id))
 
-    def list(self, limit: int) -> list[dict[str, Any]]:
-        return [public_job(job) for job in self.store.list(limit)]
+    def list(self, limit: int, project_root: str | None = None) -> list[dict[str, Any]]:
+        return [public_job(job) for job in self.store.list(limit, project_root)]
 
     def has_pending_jobs(self) -> bool:
         return self.store.has_pending_jobs()

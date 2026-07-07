@@ -39,7 +39,11 @@ class BridgeDaemon:
         if method == "job_status":
             return self.jobs.status(str(params.get("job_id", "")))
         if method == "job_list":
-            return self.jobs.list(int(params.get("limit", 10)))
+            project_root = params.get("project_root")
+            return self.jobs.list(
+                int(params.get("limit", 10)),
+                str(project_root) if project_root else None,
+            )
         if method == "job_cancel":
             return self.jobs.cancel(str(params.get("job_id", "")))
         async with self.operation_lock:

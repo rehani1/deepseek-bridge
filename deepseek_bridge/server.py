@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import subprocess
@@ -12,11 +13,56 @@ from mcp.server.fastmcp import FastMCP
 from .client import call_daemon
 
 
+MAX_PLAN_CHARS = 40_000
+PLAN_SUFFIXES = {".md", ".txt"}
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     stream=sys.stderr,
 )
+
+
+def snapshot_project_plan(project_root: str, task: str, plan_path: str | None) -> str:
+    """Build a durable task whose plan content no longer depends on Claude's context."""
+    objective = task.strip()
+    if not plan_path:
+        if not objective:
+            raise ValueError("task must not be empty when plan_path is not provided")
+        return objective
+
+    root = Path(project_root).expanduser().resolve()
+    relative = Path(plan_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("plan_path must be repository-relative and may not contain '..'")
+    unresolved = root / relative
+    if unresolved.is_symlink():
+        raise ValueError("plan_path may not be a symlink")
+    candidate = unresolved.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("plan_path escapes the project repository") from exc
+    if candidate.suffix.lower() not in PLAN_SUFFIXES:
+        raise ValueError("plan_path must be a Markdown or text file")
+    if not candidate.is_file():
+        raise ValueError(f"plan_path does not exist: {plan_path}")
+    try:
+        plan = candidate.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("plan_path must contain UTF-8 text") from exc
+    if not plan:
+        raise ValueError("plan_path is empty")
+    if len(plan) > MAX_PLAN_CHARS:
+        raise ValueError(f"plan_path exceeds the {MAX_PLAN_CHARS:,}-character limit")
+    digest = hashlib.sha256(plan.encode()).hexdigest()
+    objective = objective or "Execute the durable project plan and satisfy all acceptance criteria."
+    return (
+        f"{objective}\n\n"
+        f"Durable plan snapshot (source: {relative.as_posix()}, sha256: {digest}):\n"
+        f"{plan}"
+    )
 
 
 def surface_chromium_app() -> None:
@@ -53,7 +99,8 @@ mcp = FastMCP(
 
 @mcp.tool()
 async def deepseek_patch(
-    task: str,
+    task: str = "",
+    plan_path: str | None = None,
     paths: list[str] | None = None,
     test_command: str | None = None,
     apply_changes: bool = True,
@@ -68,7 +115,9 @@ async def deepseek_patch(
     runs network-blocked tests, and repairs failures up to twice.
 
     Args:
-        task: A self-contained implementation objective and acceptance criteria.
+        task: A concise objective, or a complete task when plan_path is omitted.
+        plan_path: Optional repository-relative Markdown/text plan. Its content is snapshotted into
+            the durable job before this tool returns, so later edits or chat loss cannot change it.
         paths: Optional repository-relative files or directories that may be changed.
         test_command: Optional test/lint command to run in the isolated worktree.
         apply_changes: Apply a validated patch to the working tree; false saves a dry-run patch.
@@ -79,13 +128,14 @@ async def deepseek_patch(
     project_root = os.environ.get("CLAUDE_PROJECT_DIR")
     if not project_root:
         raise RuntimeError("CLAUDE_PROJECT_DIR is unavailable; open Claude Code in a Git project")
+    durable_task = snapshot_project_plan(project_root, task, plan_path)
     await call_daemon("show_browser", timeout=60)
     surface_chromium_app()
     await call_daemon("show_browser", timeout=60)
     result = await call_daemon(
         "job_submit",
         {
-            "task": task,
+            "task": durable_task,
             "project_root": project_root,
             "paths": paths,
             "test_command": test_command,
@@ -107,9 +157,14 @@ async def deepseek_job_status(job_id: str) -> str:
 
 
 @mcp.tool()
-async def deepseek_jobs(limit: int = 10) -> str:
-    """List recent DeepSeek background jobs without contacting DeepSeek."""
-    result = await call_daemon("job_list", {"limit": limit}, timeout=30)
+async def deepseek_jobs(limit: int = 10, current_project_only: bool = True) -> str:
+    """List recent durable jobs, scoped to the open project by default, without contacting DeepSeek."""
+    project_root = os.environ.get("CLAUDE_PROJECT_DIR") if current_project_only else None
+    result = await call_daemon(
+        "job_list",
+        {"limit": limit, "project_root": project_root},
+        timeout=30,
+    )
     return json.dumps(result, separators=(",", ":"))
 
 
