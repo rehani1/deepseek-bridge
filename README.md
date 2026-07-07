@@ -49,11 +49,12 @@ DeepThink, and disable Search. The search tool selects `Instant` and enables Sea
 reuse the active conversation for up to 20 turns. A patch/test/repair operation uses one fresh
 conversation for the entire operation rather than creating a chat for every internal request.
 
-For multi-session projects, keep plans in the repository and submit them with `plan_path`. The
-bridge reads and hashes the plan once, embeds that exact snapshot in the SQLite job, and then reads
-bounded current repository context in the isolated worktree. Claude and VS Code can close after
-submission without losing the objective. Repeating an identical submission while it is pending
-returns the existing job ID instead of creating a duplicate.
+For a named project phase, set `autonomous=true`. DeepSeek—not Claude—audits the repository
+requirements, manifests, file inventory, and relevant implementation, derives the execution plan,
+and checkpoints that plan and conversation URL in SQLite before generating a patch. Claude and VS
+Code can close without losing the objective. Repeating an identical submission while it is pending
+returns the existing job ID instead of creating a duplicate. `plan_path` remains available as an
+optional alternative when a project already has a user-authored plan, but it is not required.
 
 ## Cost efficiency
 
@@ -231,12 +232,11 @@ Use deepseek_patch to implement the downloader changes. Restrict changes to src 
 run python -m pytest, keep the Mac awake, and wait up to 12 hours.
 ```
 
-For a durable project phase, save the detailed plan first and submit only a short objective plus
-its repository-relative path:
+For a phase that DeepSeek should own independently:
 
 ```text
-Use deepseek_patch with task="Execute Phase 3", plan_path="docs/plans/phase-3.md",
-paths=["src", "frontend", "README.md", ".github"], test_command="mvn test".
+Use deepseek_patch with task="Restart Phase 3 and independently determine the required work",
+autonomous=true, test_command="mvn test", keep_awake=true, max_wait_hours=12.
 Return the job ID and do not poll.
 ```
 

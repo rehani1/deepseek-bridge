@@ -123,6 +123,76 @@ class RepoSandboxTest(unittest.TestCase):
             self.assertEqual(app.read_text(), 'print("new")\n')
             Path(result["patch_file"]).unlink(missing_ok=True)
 
+    def test_autonomous_job_plans_and_patches_in_one_conversation(self) -> None:
+        checkpoints = []
+
+        class FakeBridge:
+            async def begin_task(self) -> None:
+                return None
+
+            async def plan(self, request: str, *, model: str = "expert") -> str:
+                self.plan_request = request
+                return "Update src/app.py and verify the new output."
+
+            def current_conversation_url(self) -> str:
+                return "https://chat.deepseek.com/a/chat/s/autonomous"
+
+            async def diff(self, request: str, *, model: str = "expert") -> str:
+                self.diff_request = request
+                return PATCH
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "agents.md").write_text("Build production-quality features.")
+            (root / "src").mkdir()
+            app = root / "src" / "app.py"
+            app.write_text('print("old")\n')
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@localhost",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "initial",
+                ],
+                cwd=root,
+                check=True,
+            )
+            bridge = FakeBridge()
+
+            result = asyncio.run(
+                PatchAgent(bridge).run(
+                    task="Implement the next project phase",
+                    project_root=str(root),
+                    paths=["src"],
+                    test_command="grep -q new src/app.py",
+                    apply_changes=True,
+                    max_repairs=0,
+                    autonomous=True,
+                    checkpoint_plan=lambda plan, url: checkpoints.append((plan, url)),
+                )
+            )
+
+            self.assertEqual(result["status"], "applied")
+            self.assertIn("agents.md", bridge.plan_request)
+            self.assertIn("Update src/app.py", bridge.diff_request)
+            self.assertEqual(
+                checkpoints,
+                [
+                    (
+                        "Update src/app.py and verify the new output.",
+                        "https://chat.deepseek.com/a/chat/s/autonomous",
+                    )
+                ],
+            )
+            Path(result["patch_file"]).unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()

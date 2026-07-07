@@ -84,6 +84,8 @@ mcp = FastMCP(
     instructions=(
         "Use deepseek_patch for substantial repository implementation: it edits an isolated Git "
         "worktree asynchronously and immediately returns a durable job ID. Do not poll repeatedly; "
+        "When the user names a project phase without supplying its full plan, set autonomous=true; "
+        "DeepSeek will inspect the repository, derive and checkpoint its own plan, then implement it. "
         "use deepseek_job_status when the user later asks. The daemon waits through Expert capacity "
         "limits, tests and repairs the change, and stores a concise result. "
         "Use deepseek_expert for delegated analysis, deepseek_generate for code returned in chat, "
@@ -101,6 +103,7 @@ mcp = FastMCP(
 async def deepseek_patch(
     task: str = "",
     plan_path: str | None = None,
+    autonomous: bool = False,
     paths: list[str] | None = None,
     test_command: str | None = None,
     apply_changes: bool = True,
@@ -118,6 +121,9 @@ async def deepseek_patch(
         task: A concise objective, or a complete task when plan_path is omitted.
         plan_path: Optional repository-relative Markdown/text plan. Its content is snapshotted into
             the durable job before this tool returns, so later edits or chat loss cannot change it.
+        autonomous: Have DeepSeek independently audit the repository, derive and checkpoint the
+            execution plan, then implement it in the same conversation. Use for named phases when
+            Claude should not create or carry the plan.
         paths: Optional repository-relative files or directories that may be changed.
         test_command: Optional test/lint command to run in the isolated worktree.
         apply_changes: Apply a validated patch to the working tree; false saves a dry-run patch.
@@ -136,6 +142,7 @@ async def deepseek_patch(
         "job_submit",
         {
             "task": durable_task,
+            "autonomous": autonomous,
             "project_root": project_root,
             "paths": paths,
             "test_command": test_command,

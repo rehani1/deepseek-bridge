@@ -97,6 +97,36 @@ class JobStoreTest(unittest.TestCase):
 
             self.assertEqual([job["task"] for job in scoped], ["First"])
 
+    def test_autonomous_plan_checkpoint_survives_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "jobs.sqlite3"
+            store = JobStore(database)
+            submitted = store.submit(
+                task="Independently implement Phase 3",
+                project_root=directory,
+                paths=None,
+                test_command=None,
+                apply_changes=False,
+                max_repairs=0,
+                keep_awake=False,
+                autonomous=True,
+                max_wait_hours=1,
+            )
+            store.checkpoint_plan(
+                submitted["id"],
+                "DeepSeek-owned implementation plan",
+                "https://chat.deepseek.com/a/chat/s/phase-3",
+            )
+
+            recovered = JobStore(database).get(submitted["id"])
+
+            self.assertTrue(recovered["autonomous"])
+            self.assertEqual(recovered["plan_text"], "DeepSeek-owned implementation plan")
+            self.assertEqual(
+                recovered["conversation_url"],
+                "https://chat.deepseek.com/a/chat/s/phase-3",
+            )
+
 
 class JobManagerTest(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_pending_job_reuses_durable_job(self) -> None:

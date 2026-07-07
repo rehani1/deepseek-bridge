@@ -61,13 +61,25 @@ class JobStore:
                     apply_changes INTEGER NOT NULL,
                     max_repairs INTEGER NOT NULL,
                     keep_awake INTEGER NOT NULL,
+                    autonomous INTEGER NOT NULL DEFAULT 0,
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     conversation_url TEXT,
+                    plan_text TEXT,
                     result_json TEXT,
                     error TEXT
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "autonomous" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN autonomous INTEGER NOT NULL DEFAULT 0"
+                )
+            if "plan_text" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN plan_text TEXT")
             connection.execute(
                 "UPDATE jobs SET status='waiting', next_attempt_at=?, "
                 "error='Daemon restarted during this attempt; job safely requeued' "
@@ -86,6 +98,7 @@ class JobStore:
         apply_changes: bool,
         max_repairs: int,
         keep_awake: bool,
+        autonomous: bool = False,
         max_wait_hours: int,
     ) -> dict[str, Any]:
         now = time.time()
@@ -96,8 +109,8 @@ class JobStore:
                 INSERT INTO jobs (
                     id, status, created_at, updated_at, next_attempt_at, deadline_at,
                     task, project_root, paths_json, test_command, apply_changes,
-                    max_repairs, keep_awake
-                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_repairs, keep_awake, autonomous
+                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -112,6 +125,7 @@ class JobStore:
                     int(apply_changes),
                     max_repairs,
                     int(keep_awake),
+                    int(autonomous),
                 ),
             )
         return self.get(job_id)
@@ -124,6 +138,7 @@ class JobStore:
         paths: list[str] | None,
         test_command: str | None,
         apply_changes: bool,
+        autonomous: bool,
     ) -> dict[str, Any] | None:
         paths_json = json.dumps(paths or [])
         placeholders = ",".join("?" for _ in PENDING_STATES)
@@ -133,7 +148,7 @@ class JobStore:
                 SELECT * FROM jobs
                 WHERE task=? AND project_root=? AND paths_json=?
                     AND COALESCE(test_command, '')=COALESCE(?, '')
-                    AND apply_changes=? AND status IN ({placeholders})
+                    AND apply_changes=? AND autonomous=? AND status IN ({placeholders})
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (
@@ -142,6 +157,7 @@ class JobStore:
                     paths_json,
                     test_command,
                     int(apply_changes),
+                    int(autonomous),
                     *tuple(PENDING_STATES),
                 ),
             ).fetchone()
@@ -153,6 +169,7 @@ class JobStore:
         value["paths"] = json.loads(value.pop("paths_json"))
         value["apply_changes"] = bool(value["apply_changes"])
         value["keep_awake"] = bool(value["keep_awake"])
+        value["autonomous"] = bool(value["autonomous"])
         result_json = value.pop("result_json")
         value["result"] = json.loads(result_json) if result_json else None
         return value
@@ -213,6 +230,19 @@ class JobStore:
                 "UPDATE jobs SET status='completed', updated_at=?, result_json=?, error=NULL "
                 "WHERE id=?",
                 (now, json.dumps(result, separators=(",", ":")), job_id),
+            )
+
+    def checkpoint_plan(
+        self,
+        job_id: str,
+        plan: str,
+        conversation_url: str | None,
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET plan_text=?, conversation_url=COALESCE(?, conversation_url), "
+                "updated_at=? WHERE id=?",
+                (plan, conversation_url, time.time(), job_id),
             )
 
     def wait(
@@ -298,6 +328,8 @@ def public_job(job: dict[str, Any]) -> dict[str, Any]:
         "deadline_at": job["deadline_at"],
         "attempt_count": job["attempt_count"],
         "keep_awake": job["keep_awake"],
+        "autonomous": job["autonomous"],
+        "plan_checkpointed": bool(job.get("plan_text")),
         "error": job["error"],
         "result": job["result"],
     }
@@ -356,6 +388,7 @@ class JobManager:
         max_wait_hours = max(1, min(int(params.get("max_wait_hours", 12)), 24))
         max_repairs = max(0, min(int(params.get("max_repairs", 2)), 2))
         apply_changes = bool(params.get("apply_changes", True))
+        autonomous = bool(params.get("autonomous", False))
         test_command = params.get("test_command")
         if test_command is not None and not isinstance(test_command, str):
             raise ValueError("test_command must be a string")
@@ -366,6 +399,7 @@ class JobManager:
             paths=paths,
             test_command=test_command,
             apply_changes=apply_changes,
+            autonomous=autonomous,
         )
         if duplicate is not None:
             result = public_job(duplicate)
@@ -379,6 +413,7 @@ class JobManager:
             apply_changes=apply_changes,
             max_repairs=max_repairs,
             keep_awake=bool(params.get("keep_awake", True)),
+            autonomous=autonomous,
             max_wait_hours=max_wait_hours,
         )
         self.wake.set()
@@ -475,6 +510,11 @@ class JobManager:
                     max_repairs=job["max_repairs"],
                     conversation_url=job["conversation_url"] if model == "expert" else None,
                     model=model,
+                    autonomous=job["autonomous"],
+                    project_plan=job["plan_text"],
+                    checkpoint_plan=lambda plan, url: self.store.checkpoint_plan(
+                        job["id"], plan, url
+                    ),
                 )
             self.store.complete(job["id"], result)
         except asyncio.CancelledError:

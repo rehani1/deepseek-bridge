@@ -10,7 +10,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from .bridge import normalize_task
 from .client import STATE_DIR
@@ -26,6 +26,7 @@ MAX_CHANGED_FILES = 30
 MAX_DELETED_LINES = 5_000
 MAX_TEST_OUTPUT_CHARS = 20_000
 MAX_UNTRACKED_BYTES = 20_000_000
+MAX_AUTONOMOUS_PLAN_CHARS = 24_000
 
 SENSITIVE_NAMES = {
     ".env",
@@ -39,6 +40,9 @@ SENSITIVE_NAMES = {
 }
 SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".keystore"}
 MANIFEST_NAMES = {
+    "agents.md",
+    "AGENTS.md",
+    "README.md",
     "package.json",
     "pyproject.toml",
     "requirements.txt",
@@ -514,6 +518,22 @@ Repository context:
 """
 
 
+def autonomous_plan_prompt(task: str, context: str) -> str:
+    return f"""Determine and plan the requested project phase independently.
+
+Use the repository requirements, manifests, file inventory, and current implementation below as
+the source of truth. Identify what is already implemented before choosing changes. Do not assume
+that a checklist item is missing merely because the task is brief. Keep the plan coherent enough
+for one patch job and explicitly include verification steps.
+
+Requested phase or objective:
+{task}
+
+Repository snapshot:
+{context}
+"""
+
+
 def repair_patch_prompt(
     task: str,
     allowed: list[Path],
@@ -579,6 +599,9 @@ class PatchAgent:
         max_repairs: int = 2,
         conversation_url: str | None = None,
         model: str = "expert",
+        autonomous: bool = False,
+        project_plan: str | None = None,
+        checkpoint_plan: Callable[[str, str | None], None] | None = None,
         **_: Any,
     ) -> dict[str, Any]:
         clean_task = normalize_task(task)
@@ -593,7 +616,31 @@ class PatchAgent:
             else:
                 await self.bridge.begin_task()
             allowed = resolve_requested_paths(sandbox.root, paths)
-            context, context_files = build_context(sandbox.path, clean_task, allowed)
+            context, context_files = build_context(
+                sandbox.path,
+                clean_task,
+                [] if autonomous else allowed,
+            )
+            if autonomous:
+                plan = (project_plan or "").strip()
+                if not plan:
+                    plan = (
+                        await self.bridge.plan(
+                            autonomous_plan_prompt(clean_task, context),
+                            model=model,
+                        )
+                    ).strip()
+                    if not plan:
+                        raise PatchAgentError("DeepSeek returned an empty autonomous project plan")
+                    plan = plan[:MAX_AUTONOMOUS_PLAN_CHARS]
+                    if checkpoint_plan is not None:
+                        checkpoint_plan(plan, self.bridge.current_conversation_url())
+                clean_task = (
+                    f"{clean_task}\n\n"
+                    "DeepSeek-derived execution plan (checkpointed by the bridge):\n"
+                    f"{plan}"
+                )
+                context, context_files = build_context(sandbox.path, clean_task, [])
             request = initial_patch_prompt(clean_task, allowed, context)
             raw = await self.bridge.diff(request, model=model)
             for malformed_attempt in range(3):

@@ -486,6 +486,24 @@ class DeepSeekWebBridge:
         )
         return await self._query(prompt, prefer_code=True, model=model, search=False)
 
+    async def plan(self, request: str, *, model: str = "expert") -> str:
+        clean_request = request.strip()
+        if not clean_request:
+            raise ValueError("planning request must not be empty")
+        if len(clean_request) > MAX_BRIDGE_PROMPT_CHARS:
+            raise ValueError(
+                f"planning request exceeds the {MAX_BRIDGE_PROMPT_CHARS:,}-character limit"
+            )
+        role = "DeepSeek Expert" if model == "expert" else "a senior software engineer"
+        prompt = (
+            f"You are {role} operating in DeepThink mode. Independently audit the supplied "
+            "repository snapshot and produce a concrete implementation plan for the requested "
+            "phase. Prioritize correctness, compatibility, and verification. Return only the "
+            "concise plan and acceptance criteria; do not produce code yet.\n\n"
+            f"{clean_request}"
+        )
+        return await self._query(prompt, prefer_code=False, model=model, search=False)
+
     async def _query(
         self,
         prompt: str,
