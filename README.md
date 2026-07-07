@@ -40,6 +40,9 @@ overnight.
 - `deepseek_search`: performs current web research using Instant mode and Search.
 - `deepseek_status`: checks the daemon and authenticated web session.
 - `deepseek_show_browser`: surfaces the bridge-owned Chromium window without sending a query.
+- `deepseek_last_response`: recovers the latest completed browser answer without sending another
+  query. Completed answers are cached with user-only permissions so recovery survives browser,
+  daemon, and VS Code restarts. Large results will enter Claude's context when retrieved.
 
 The patch, expert, and generate tools select the site's actual `Expert` radio control, enable
 DeepThink, and disable Search. The search tool selects `Instant` and enables Search. Normal queries

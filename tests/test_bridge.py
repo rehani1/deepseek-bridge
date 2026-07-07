@@ -1,8 +1,13 @@
 import unittest
 import time
 import asyncio
+import tempfile
+from pathlib import Path
 
+import deepseek_bridge.bridge as bridge_module
 from deepseek_bridge.bridge import (
+    DeepSeekWebBridge,
+    choose_response_text,
     is_busy_response,
     normalize_task,
     sanitize_rendered_text,
@@ -32,6 +37,36 @@ class BridgeHelpersTest(unittest.TestCase):
     def test_normal_text_is_preserved(self) -> None:
         value = "Use Python for this answer.\n\nThe implementation follows."
         self.assertEqual(sanitize_rendered_text(value), value)
+
+    def test_full_response_wins_over_inline_code_fragments(self) -> None:
+        rendered = (
+            "src/ApiResponse.java\n"
+            "public record ApiResponse<T>(T data) {}\n\n"
+            "src/Mapper.java\n"
+            "return ApiResponse.fromEntity(entity);"
+        )
+        self.assertEqual(
+            choose_response_text(rendered, ["ApiResponse", "fromEntity"]),
+            rendered,
+        )
+
+    def test_code_blocks_are_an_empty_rendered_text_fallback(self) -> None:
+        self.assertEqual(choose_response_text("", ["class A {}", "class B {}"]),
+                         "class A {}\n\nclass B {}")
+
+    def test_last_response_cache_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            original = bridge_module.DEFAULT_LAST_RESPONSE_PATH
+            bridge_module.DEFAULT_LAST_RESPONSE_PATH = Path(temporary) / "last-response.txt"
+            try:
+                DeepSeekWebBridge._save_last_response("complete response")
+                self.assertEqual(DeepSeekWebBridge._load_last_response(), "complete response")
+                self.assertEqual(
+                    bridge_module.DEFAULT_LAST_RESPONSE_PATH.stat().st_mode & 0o777,
+                    0o600,
+                )
+            finally:
+                bridge_module.DEFAULT_LAST_RESPONSE_PATH = original
 
     def test_busy_response_is_detected(self) -> None:
         self.assertTrue(is_busy_response("Server is busy. Try again later, or use Instant Mode."))

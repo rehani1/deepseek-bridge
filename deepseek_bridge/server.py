@@ -43,6 +43,8 @@ mcp = FastMCP(
         "Use deepseek_expert for delegated analysis, deepseek_generate for code returned in chat, "
         "and deepseek_search for current web research. Expert/generate/patch use actual Expert "
         "mode when available and use one controlled Instant fallback; search uses Instant mode. "
+        "Use deepseek_last_response to recover the latest completed browser answer without "
+        "submitting another request. "
         "Review untrusted generated changes before execution."
     ),
     log_level="WARNING",
@@ -149,6 +151,12 @@ async def deepseek_show_browser() -> str:
     surface_chromium_app()
     await call_daemon("show_browser", timeout=60)
     return result
+
+
+@mcp.tool()
+async def deepseek_last_response() -> str:
+    """Retrieve the latest completed Chromium response without sending a DeepSeek query."""
+    return str(await call_daemon("last_response", timeout=210))
 
 
 def main() -> None:

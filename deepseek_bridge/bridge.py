@@ -25,6 +25,9 @@ DEFAULT_PROFILE_DIR = (
 DEFAULT_RATE_STATE_PATH = (
     Path.home() / "Library" / "Application Support" / "deepseek-bridge" / "rate-state.json"
 )
+DEFAULT_LAST_RESPONSE_PATH = (
+    Path.home() / "Library" / "Application Support" / "deepseek-bridge" / "last-response.txt"
+)
 MAX_TASK_CHARS = 50_000
 MAX_RESPONSE_CHARS = 120_000
 MAX_BRIDGE_PROMPT_CHARS = 180_000
@@ -115,6 +118,18 @@ def sanitize_rendered_text(value: str) -> str:
     return "\n".join(cleaned).strip()
 
 
+def choose_response_text(rendered_text: str, code_blocks: list[str]) -> str:
+    """Prefer the complete rendered answer over partial code-node matches.
+
+    DeepSeek uses ``<code>`` for inline identifiers as well as fenced blocks. Treating any code
+    node as the response can collapse a large multi-file answer to a few inline symbols.
+    """
+    complete = sanitize_rendered_text(rendered_text)
+    if complete:
+        return complete
+    return "\n\n".join(block.strip() for block in code_blocks if block.strip()).strip()
+
+
 def is_busy_response(value: str) -> bool:
     lowered = value.lower()
     return any(marker in lowered for marker in BUSY_RESPONSE_MARKERS)
@@ -150,6 +165,21 @@ class DeepSeekWebBridge:
         temporary.write_text(json.dumps(self._rate_state, separators=(",", ":")))
         temporary.chmod(0o600)
         temporary.replace(DEFAULT_RATE_STATE_PATH)
+
+    @staticmethod
+    def _load_last_response() -> str:
+        try:
+            return DEFAULT_LAST_RESPONSE_PATH.read_text().strip()
+        except OSError:
+            return ""
+
+    @staticmethod
+    def _save_last_response(value: str) -> None:
+        DEFAULT_LAST_RESPONSE_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = DEFAULT_LAST_RESPONSE_PATH.with_suffix(".tmp")
+        temporary.write_text(value)
+        temporary.chmod(0o600)
+        temporary.replace(DEFAULT_LAST_RESPONSE_PATH)
 
     def _check_cooldown(self, model: str) -> None:
         state = self._rate_state.setdefault(model, {})
@@ -323,6 +353,30 @@ class DeepSeekWebBridge:
             await self._activate_browser(page)
             return f"DeepSeek Chromium surfaced at {page.url}"
 
+    async def last_response(self) -> str:
+        """Return the latest complete rendered answer without submitting another request."""
+        async with self._lock:
+            page = await self.start()
+            await self._ensure_chat(page)
+            deadline = asyncio.get_running_loop().time() + 180
+            while await self._generation_is_active(page):
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise DeepSeekBridgeError(
+                        "The latest DeepSeek response is still generating after 180 seconds"
+                    )
+                await asyncio.sleep(1)
+            response, _ = await self._settle_responses(page, prefer_code=True)
+            if response:
+                complete = strip_single_code_fence(response)[:MAX_RESPONSE_CHARS]
+                self._save_last_response(complete)
+                return complete
+            cached = self._load_last_response()
+            if cached:
+                return cached[:MAX_RESPONSE_CHARS]
+            raise DeepSeekBridgeError(
+                "No completed DeepSeek response is visible or present in the local recovery cache"
+            )
+
     async def close(self) -> None:
         if self._context is not None:
             await self._context.close()
@@ -487,7 +541,9 @@ class DeepSeekWebBridge:
             self._clear_busy(model)
             self.request_count += 1
             self._conversation_turns += 1
-            return strip_single_code_fence(response)[:MAX_RESPONSE_CHARS]
+            complete = strip_single_code_fence(response)[:MAX_RESPONSE_CHARS]
+            self._save_last_response(complete)
+            return complete
 
     async def _ensure_chat(self, page: Page) -> None:
         if page.url.startswith(CHAT_URL):
@@ -658,19 +714,19 @@ class DeepSeekWebBridge:
                 count = await locator.count()
                 if count:
                     response = locator.nth(count - 1)
+                    rendered = await response.inner_text()
+                    blocks: list[str] = []
                     if prefer_code:
-                        code = response.locator("pre code, .md-code-block code, code")
+                        # Bare ``code`` also matches inline identifiers. Block selectors are only
+                        # a fallback for a response whose rendered text is unexpectedly empty.
+                        code = response.locator("pre code, .md-code-block code")
                         code_count = await code.count()
                         if code_count:
                             blocks = [
                                 (await code.nth(index).text_content() or "").strip()
                                 for index in range(code_count)
                             ]
-                            text = "\n\n".join(block for block in blocks if block)
-                        else:
-                            text = sanitize_rendered_text(await response.inner_text())
-                    else:
-                        text = sanitize_rendered_text(await response.inner_text())
+                    text = choose_response_text(rendered, blocks)
                     if text:
                         return text
             except Exception:

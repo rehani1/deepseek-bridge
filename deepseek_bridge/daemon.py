@@ -45,6 +45,8 @@ class BridgeDaemon:
         async with self.operation_lock:
             if method == "show_browser":
                 return await self.bridge.show_browser()
+            if method == "last_response":
+                return await self.bridge.last_response()
             if method == "status":
                 return await self.bridge.status()
             if method == "generate":
