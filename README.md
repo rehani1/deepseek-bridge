@@ -285,6 +285,29 @@ PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -v
 
 In VS Code, use `/mcp` to reconnect `deepseek-free` after a tool-schema update.
 
+### `deepseek-v4-* is temporarily unavailable` before an MCP call
+
+If Claude Code reports that a DeepSeek model cannot classify or approve
+`mcp__deepseek-free__deepseek_patch`, the call has not reached this bridge. Check both the normal
+Claude settings and VS Code's user settings. Remove DeepSeek direct-API overrides such as
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, and the
+`ANTHROPIC_DEFAULT_*_MODEL` variables from `claudeCode.environmentVariables`, then fully restart
+the Claude Code session. Those extension-level variables override `~/.claude/settings.json`.
+
+For unattended patch submission, explicitly allow only the patch tool in
+`~/.claude/settings.json` rather than disabling the permission system globally:
+
+```json
+{
+  "permissions": {
+    "allow": ["mcp__deepseek-free__deepseek_patch"]
+  }
+}
+```
+
+Keep a native Claude model such as Haiku as the coordinator. Direct DeepSeek API mode and this MCP
+bridge are separate architectures and should not be enabled in the same Claude Code process.
+
 Browser UI automation can still break when DeepSeek changes its site. The bridge does not bypass
 login, CAPTCHAs, rate limits, or other access controls. Generated code remains untrusted and
 should be reviewed before execution.
